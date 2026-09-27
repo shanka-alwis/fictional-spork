@@ -1,0 +1,14 @@
+services:
+  dvr:
+    build: .
+    container_name: dvr
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      TZ: Etc/UTC                   # set your time zone (e.g. Europe/London): used for file names and schedules
+      DVR_USERNAME: admin
+      DVR_PASSWORD: change-me       # leave empty to disable the login page (not recommended)
+    volumes:
+      - ./data:/data                # database, recordings and rclone config
+      # - /mnt/nas/cctv:/nas        # optional: a mounted share to use as a "folder" destination

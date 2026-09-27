@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DVR</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="login" class="login hidden">
+  <form id="login-form" class="card">
+    <h1>DVR</h1>
+    <label>Username <input name="username" autocomplete="username" required></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+    <p id="login-error" class="error"></p>
+    <button class="primary" type="submit">Sign in</button>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <div class="brand">● DVR</div>
+    <nav id="nav">
+      <a data-view="live">Live</a>
+      <a data-view="recordings">Recordings</a>
+      <a data-view="cameras">Cameras</a>
+      <a data-view="uploads">Uploads</a>
+      <a data-view="settings">Settings</a>
+      <a data-view="logs">Logs</a>
+    </nav>
+    <div id="status-bar" class="muted"></div>
+    <button id="logout" class="ghost hidden">Sign out</button>
+  </header>
+  <main id="view"></main>
+</div>
+
+<dialog id="modal"><div id="modal-body"></div></dialog>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
