@@ -3,11 +3,15 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from . import events, storage
 
-RCLONE_TIMEOUT = 60 * 60
+RCLONE_TIMEOUT = 6 * 60 * 60
+# Only files in our own layout (<camera>/<YYYY-MM-DD>/<file>.mp4) are ever deleted from a destination,
+# so pointing a destination at a folder that holds other files can't lose them.
+RCLONE_OWN_FILES = "/*/????-??-??/*.mp4"
 
 
 class UploadError(Exception):
@@ -26,7 +30,7 @@ class Uploader:
             return dest_id in self._running
 
     # -- transports --------------------------------------------------------
-    def _rclone(self, *args, timeout=RCLONE_TIMEOUT) -> str:
+    def _rclone(self, *args, timeout=RCLONE_TIMEOUT) -> subprocess.CompletedProcess:
         cmd = [self.cfg.rclone]
         if self.cfg.rclone_config:
             cmd += ["--config", self.cfg.rclone_config]
@@ -39,7 +43,7 @@ class Uploader:
             raise UploadError("rclone timed out")
         if p.returncode != 0:
             raise UploadError((p.stderr or p.stdout).strip()[-500:] or f"rclone exit {p.returncode}")
-        return p.stdout
+        return p
 
     @staticmethod
     def _join_remote(target: str, rel: str) -> str:
@@ -50,7 +54,7 @@ class Uploader:
             out = Path(dest["target"]) / rel
             out.parent.mkdir(parents=True, exist_ok=True)
             tmp = out.with_name(out.name + ".part")
-            shutil.copyfile(src, tmp)
+            shutil.copy2(src, tmp)  # keeps mtime, which remote cleanup ages files by
             os.replace(tmp, out)
             return str(out)
         if dest["type"] == "rclone":
@@ -83,9 +87,34 @@ class Uploader:
 
     def list_remotes(self) -> list[str]:
         try:
-            return [r for r in self._rclone("listremotes", timeout=20).split() if r]
+            return [r for r in self._rclone("listremotes", timeout=20).stdout.split() if r]
         except UploadError:
             return []
+
+    def cleanup_remote(self, dest) -> int:
+        """Delete footage older than `remote_keep_days` from the destination. Returns files removed."""
+        days = int(dest.get("remote_keep_days") or 0)
+        if days <= 0:
+            return 0
+        if dest["type"] == "local":
+            root = Path(dest["target"])
+            cutoff = time.time() - days * 86400
+            removed = 0
+            for f in root.glob("*/????-??-??/*.mp4"):
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            for d in root.glob("*/????-??-??"):
+                if d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+            return removed
+        if dest["type"] == "rclone":
+            p = self._rclone("delete", "-v", "--min-age", f"{days}d", "--include", RCLONE_OWN_FILES, dest["target"])
+            removed = sum(1 for line in p.stderr.splitlines() if ": Deleted" in line)
+            if removed:
+                self._rclone("rmdirs", "--leave-root", dest["target"])
+            return removed
+        return 0
 
     # -- job ---------------------------------------------------------------
     def pending(self, dest) -> list[dict]:
@@ -146,6 +175,18 @@ class Uploader:
             status = f"{ok} uploaded, {failed} failed: {last_error}"
         else:
             status = f"{ok} uploaded" if ok else "nothing to upload"
+        cleanup_failed = False
+        try:
+            cleaned = self.cleanup_remote(dest)
+            if cleaned:
+                status += f"; removed {cleaned} file(s) older than {dest['remote_keep_days']} days"
+        except (UploadError, OSError) as e:
+            cleanup_failed = True
+            status += f"; cleanup failed: {e}"
         self.db.set_destination_result(dest_id, status)
-        events.emit("error" if failed else "info", f"upload:{dest['name']}", status)
+        events.emit("error" if failed or cleanup_failed else "info", f"upload:{dest['name']}", status)
         return {"uploaded": ok, "failed": failed}
+
+    def pending_summary(self, dest) -> dict:
+        p = self.pending(dest)
+        return {"pending": len(p), "pending_bytes": sum(r["size"] for r in p)}

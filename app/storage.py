@@ -79,33 +79,86 @@ def disk_usage(recordings_dir: Path) -> dict:
     return {"recordings_bytes": used, "disk_free_bytes": free, "disk_total_bytes": total}
 
 
-def apply_retention(db, recordings_dir: Path) -> int:
-    """Delete old segments per settings. Returns number of files removed."""
+def _disk_percent(path: Path) -> tuple[float, int, int]:
+    """(used percent, free bytes, total bytes) of the filesystem holding `path`."""
+    st = os.statvfs(path)
+    free, total = st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
+    return (100.0 * (1 - free / total) if total else 0.0), free, total
+
+
+_last_full_warning = 0.0
+
+
+def apply_retention(db, recordings_dir: Path, now: datetime | None = None, disk_percent=None) -> int:
+    """Delete local segments per settings. Returns number of files removed.
+
+    1. Footage uploaded to any destination is deleted `local_keep_days_after_upload` days later.
+    2. Footage older than `max_age_days` is deleted even if not uploaded (0 = never).
+    3. If the disk is fuller than `max_disk_percent`, the oldest *uploaded* footage goes first.
+       Footage that hasn't been uploaded is never removed by this rule.
+    """
+    global _last_full_warning
+    now = now or datetime.now()
+    disk_percent = disk_percent or _disk_percent
     s = db.get_settings()
-    days = int(s.get("retention_days") or 0)
-    max_bytes = float(s.get("max_storage_gb") or 0) * 1024 ** 3
-    require_upload = bool(s.get("retention_require_upload"))
-    uploaded = db.upload_map() if require_upload else {}
+    keep = timedelta(days=float(s.get("local_keep_days_after_upload") or 0))
+    max_age = float(s.get("max_age_days") or 0)
+    max_pct = float(s.get("max_disk_percent") or 0)
+    uploaded = db.first_upload_times()
 
     recs = [r for r in list_recordings(recordings_dir) if r["ready"]]
     recs.sort(key=lambda r: r["start"])  # oldest first
-    if require_upload:
-        recs = [r for r in recs if uploaded.get(r["rel_path"])]
+    age_cutoff = (now - timedelta(days=max_age)).isoformat() if max_age > 0 else None
 
     removed = 0
-    cutoff = (datetime.now() - timedelta(days=days)).isoformat() if days > 0 else None
-    total = sum(r["size"] for r in list_recordings(recordings_dir))
+    remaining = []
     for r in recs:
-        too_old = cutoff is not None and r["start"] < cutoff
-        over_quota = max_bytes > 0 and total > max_bytes
-        if not (too_old or over_quota):
-            continue
-        try:
-            os.remove(r["path"])
+        up = uploaded.get(r["rel_path"])
+        expired = up is not None and now - datetime.fromisoformat(up) >= keep
+        too_old = age_cutoff is not None and r["start"] < age_cutoff
+        if (expired or too_old) and _remove(r["path"]):
             removed += 1
-            total -= r["size"]
-        except FileNotFoundError:
-            pass
+        else:
+            remaining.append(r)
+
+    if max_pct > 0:
+        pct, free, total = disk_percent(recordings_dir)
+        if pct > max_pct:
+            for r in remaining:
+                if pct <= max_pct:
+                    break
+                if r["rel_path"] in uploaded and _remove(r["path"]):
+                    removed += 1
+                    free += r["size"]
+                    pct = 100.0 * (1 - free / total)
+            if pct > max_pct and time.time() - _last_full_warning > 3600:
+                _last_full_warning = time.time()
+                events.emit("warning", "retention",
+                            f"disk is {pct:.0f}% full and the rest of the footage hasn't been uploaded yet")
     if removed:
-        events.emit("info", "retention", f"deleted {removed} old recording(s)")
+        events.emit("info", "retention", f"deleted {removed} local recording(s)")
     return removed
+
+
+def _remove(path) -> bool:
+    try:
+        os.remove(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def daily_rates(recordings_dir: Path) -> dict[int, float]:
+    """Measured bytes/day per camera, from the last 48h of segments."""
+    since = (datetime.now() - timedelta(hours=48)).isoformat()
+    size: dict[int, int] = {}
+    secs: dict[int, float] = {}
+    for r in list_recordings(recordings_dir):
+        if r["start"] < since or not r["ready"]:
+            continue
+        dur = (datetime.fromisoformat(r["end"]) - datetime.fromisoformat(r["start"])).total_seconds()
+        if dur <= 0:
+            continue
+        size[r["camera_id"]] = size.get(r["camera_id"], 0) + r["size"]
+        secs[r["camera_id"]] = secs.get(r["camera_id"], 0) + dur
+    return {cam: size[cam] / secs[cam] * 86400 for cam in size if secs[cam] >= 60}

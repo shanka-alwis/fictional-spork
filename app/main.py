@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.sessions import SessionMiddleware
@@ -27,11 +27,17 @@ STATIC_DIR = Path(__file__).parent / "static"
 class CameraIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: str = Field(min_length=1)
+    live_url: str | None = None  # lower-resolution stream for live view (e.g. Tapo stream2)
     enabled: bool = True
     record_mode: Literal["continuous", "schedule", "off"] = "continuous"
     schedule: list[dict] = []
     segment_seconds: int = Field(300, ge=30, le=3600)
     audio: bool = False
+
+    @field_validator("live_url")
+    @classmethod
+    def _live_url(cls, v):
+        return v.strip() or None if v else None
 
     @field_validator("schedule")
     @classmethod
@@ -43,9 +49,10 @@ class DestinationIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     type: Literal["rclone", "local"]
     target: str = Field(min_length=1)
-    cron: str = "0 * * * *"
+    cron: str = "0 1 * * *"
     camera_ids: list[int] | None = None
     delete_after_upload: bool = False
+    remote_keep_days: int = Field(30, ge=0, le=3650)  # 0 = keep forever
     enabled: bool = True
 
     @field_validator("cron")
@@ -56,9 +63,9 @@ class DestinationIn(BaseModel):
 
 
 class SettingsIn(BaseModel):
-    retention_days: int = Field(ge=0, le=3650)
-    max_storage_gb: float = Field(ge=0)
-    retention_require_upload: bool
+    local_keep_days_after_upload: float = Field(ge=0, le=3650)
+    max_age_days: float = Field(ge=0, le=3650)
+    max_disk_percent: float = Field(ge=0, le=99)
     live_fps: int = Field(ge=1, le=30)
     live_width: int = Field(ge=160, le=3840)
 
@@ -191,35 +198,23 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         frame = live.latest_frame(cam_id)
         if frame is None:
             try:
-                frame = ffmpeg.snapshot(cfg.ffmpeg, cam["url"])
+                frame = ffmpeg.snapshot(cfg.ffmpeg, cam["live_url"] or cam["url"])
             except RuntimeError as e:
                 raise HTTPException(502, events.redact(str(e)))
         return Response(frame, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
-    @app.get("/api/cameras/{cam_id}/live.mjpg")
-    async def live_view(cam_id: int, request: Request):
+    @app.get("/api/cameras/{cam_id}/frame")
+    async def live_frame(cam_id: int):
+        """Latest live JPEG. The page polls this a few times a second per camera."""
         cam = camera_or_404(cam_id)
         s = db.get_settings()
-        stream = live.acquire(cam_id, cam["url"], int(s["live_fps"]), int(s["live_width"]))
-        boundary = "frame"
-
-        async def gen():
-            seq = 0
-            try:
-                while not await request.is_disconnected():
-                    seq_new, frame = await asyncio.to_thread(stream.wait_frame, seq, 5.0)
-                    if not stream.alive and seq_new == seq:
-                        break
-                    if frame is None or seq_new == seq:
-                        continue
-                    seq = seq_new
-                    yield (f"--{boundary}\r\nContent-Type: image/jpeg\r\n"
-                           f"Content-Length: {len(frame)}\r\n\r\n").encode() + frame + b"\r\n"
-            finally:
-                live.release(stream)
-
-        return StreamingResponse(gen(), media_type=f"multipart/x-mixed-replace; boundary={boundary}",
-                                 headers={"Cache-Control": "no-store"})
+        stream = live.get(cam_id, cam["live_url"] or cam["url"], int(s["live_fps"]), int(s["live_width"]))
+        frame = stream.frame
+        if frame is None:  # just started: wait for the first frame
+            _, frame = await asyncio.to_thread(stream.wait_frame, 0, 10.0)
+        if frame is None:
+            raise HTTPException(503, ffmpeg.explain(events.redact(stream.error or "")) or "waiting for camera")
+        return Response(frame, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     # -- recordings ------------------------------------------------------------
     @app.get("/api/recordings")
@@ -260,13 +255,18 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(404, "destination not found")
         return d
 
-    def dest_view(d):
+    def dest_view(d, rates=None):
+        rates = storage.daily_rates(cfg.recordings_dir) if rates is None else rates
+        cams = d["camera_ids"]
+        per_day = sum(v for k, v in rates.items() if not cams or k in cams)
         return {**d, "running": uploader.is_running(d["id"]), "next_run": jobs.next_run(d["id"]),
-                "pending": len(uploader.pending(d))}
+                **uploader.pending_summary(d), "bytes_per_day": per_day,
+                "estimated_remote_bytes": per_day * d["remote_keep_days"] if d["remote_keep_days"] else None}
 
     @app.get("/api/destinations")
     def list_destinations():
-        return [dest_view(d) for d in db.list_destinations()]
+        rates = storage.daily_rates(cfg.recordings_dir)
+        return [dest_view(d, rates) for d in db.list_destinations()]
 
     @app.post("/api/destinations", status_code=201)
     def create_destination(body: DestinationIn):
@@ -326,9 +326,14 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.get("/api/status")
     def status():
         cams = db.list_cameras()
+        rates = storage.daily_rates(cfg.recordings_dir)
+        smart = cfg.data_dir / "smart-status.txt"
         return {
             "cameras": len(cams),
             "recording": sum(1 for c in cams if recorder.is_recording(c["id"])),
+            "bytes_per_day": {c["name"]: rates.get(c["id"]) for c in cams},
+            "total_bytes_per_day": sum(rates.values()),
+            "disk_health": smart.read_text().strip()[:2000] if smart.exists() else None,
             **storage.disk_usage(cfg.recordings_dir),
         }
 

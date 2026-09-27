@@ -1,7 +1,9 @@
-"""Shared on-demand MJPEG live streams.
+"""Shared on-demand live frames.
 
-One ffmpeg process per camera feeds every viewer; it starts with the first
-viewer and stops shortly after the last one leaves.
+One ffmpeg process per camera decodes the (sub-)stream to JPEG frames that every
+viewer polls. Browsers only open ~6 connections per server, so viewers fetch single
+frames instead of holding a stream open per camera. The process starts on the first
+request and stops once nobody has asked for a frame for a few seconds.
 """
 import subprocess
 import threading
@@ -17,8 +19,7 @@ class LiveStream:
         self.url, self.cfg, self.fps, self.width = url, cfg, fps, width
         self.frame: bytes | None = None
         self.seq = 0
-        self.viewers = 0
-        self.last_viewer = time.time()
+        self.last_request = time.time()
         self.error: str | None = None
         self.proc: subprocess.Popen | None = None
         self.cond = threading.Condition()
@@ -78,20 +79,16 @@ class LiveManager:
         self._stop = threading.Event()
         threading.Thread(target=self._reaper, daemon=True).start()
 
-    def acquire(self, cam_id, url, fps, width) -> LiveStream:
+    def get(self, cam_id, url, fps, width) -> LiveStream:
+        """The running stream for a camera, (re)started as needed."""
         with self._lock:
             s = self.streams.get(cam_id)
             if s is None or not s.alive or s.url != url or s.fps != fps or s.width != width:
                 if s:
                     s.stop()
                 s = self.streams[cam_id] = LiveStream(url, self.cfg, fps, width)
-            s.viewers += 1
+            s.last_request = time.time()
             return s
-
-    def release(self, stream: LiveStream):
-        with self._lock:
-            stream.viewers -= 1
-            stream.last_viewer = time.time()
 
     def latest_frame(self, cam_id) -> bytes | None:
         with self._lock:
@@ -102,7 +99,7 @@ class LiveManager:
         while not self._stop.wait(2):
             with self._lock:
                 for cam_id, s in list(self.streams.items()):
-                    if s.viewers <= 0 and time.time() - s.last_viewer > IDLE_TIMEOUT:
+                    if time.time() - s.last_request > IDLE_TIMEOUT:
                         s.stop()
                         del self.streams[cam_id]
 

@@ -87,7 +87,7 @@ class CameraRecorder:
             self.proc = None
             self.started_at = None
             if want:
-                self._fail(f"ffmpeg exited with code {code}: {tail}".rstrip(": "))
+                self._fail(ffmpeg.explain(tail) if tail else f"ffmpeg exited with code {code}")
         if want and not self.running and now >= self.next_attempt:
             self.start()
         elif not want and self.running:

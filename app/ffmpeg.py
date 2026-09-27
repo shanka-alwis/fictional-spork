@@ -33,8 +33,26 @@ def record_cmd(ffmpeg: str, url: str, out_dir: str, segment_seconds: int, audio:
 
 
 def mjpeg_cmd(ffmpeg: str, url: str, fps: int, width: int) -> list[str]:
-    return [ffmpeg, *input_args(url), "-an", "-vf", f"fps={fps},scale={width}:-2",
+    # never upscale: a camera's low-res sub-stream is shown at its own size
+    return [ffmpeg, *input_args(url), "-an", "-vf", f"fps={fps},scale=w=min({width}\\,iw):h=-2",
             "-q:v", "7", "-f", "mjpeg", "pipe:1"]
+
+
+FRIENDLY_ERRORS = [
+    ("401", "The camera rejected the username or password. For Tapo, use the Camera Account "
+            "(Tapo app → Camera settings → Advanced settings → Camera account), not your Tapo login."),
+    ("404", "The camera doesn't have that stream path. For Tapo use /stream1 or /stream2."),
+    ("Connection refused", "The camera refused the connection. Check the IP address and that RTSP is enabled."),
+    ("No route to host", "Can't reach that IP address. Check the camera is on and on the same network."),
+    ("timed out", "The camera didn't answer. Check the IP address and that it's on the same network."),
+]
+
+
+def explain(error: str) -> str:
+    for needle, message in FRIENDLY_ERRORS:
+        if needle in error:
+            return message
+    return error
 
 
 def snapshot(ffmpeg: str, url: str, width: int = 960, timeout: float = 15) -> bytes:
@@ -46,9 +64,9 @@ def snapshot(ffmpeg: str, url: str, width: int = 960, timeout: float = 15) -> by
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise RuntimeError("timed out connecting to camera")
+        raise RuntimeError(explain("timed out"))
     except FileNotFoundError:
         raise RuntimeError(f"ffmpeg not found ({ffmpeg})")
     if proc.returncode != 0 or not proc.stdout:
-        raise RuntimeError(proc.stderr.decode(errors="replace").strip()[-500:] or "no frame received")
+        raise RuntimeError(explain(proc.stderr.decode(errors="replace").strip()[-500:] or "no frame received"))
     return proc.stdout

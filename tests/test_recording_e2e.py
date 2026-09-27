@@ -33,3 +33,18 @@ def test_record_segments_and_upload(tmp_path, sample_video, monkeypatch):
 def test_snapshot(sample_video):
     jpeg = snapshot("ffmpeg", str(sample_video))
     assert jpeg[:2] == b"\xff\xd8"
+
+
+def test_live_frame_endpoint(tmp_path, sample_video, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    monkeypatch.setenv("DVR_DISABLE_WORKERS", "1")
+    monkeypatch.delenv("DVR_PASSWORD", raising=False)
+    with TestClient(create_app(Config(tmp_path))) as c:
+        cam = c.post("/api/cameras", json={"name": "T", "url": "rtsp://unused", "live_url": str(sample_video)}).json()
+        r = c.get(f"/api/cameras/{cam['id']}/frame")
+        assert r.status_code == 200 and r.content[:2] == b"\xff\xd8"
+        assert c.app.state.live.streams[cam["id"]].url == str(sample_video)  # used the live-view stream
+        bad = c.post("/api/cameras", json={"name": "B", "url": str(tmp_path / "missing.mp4")}).json()
+        assert c.get(f"/api/cameras/{bad['id']}/frame").status_code == 503

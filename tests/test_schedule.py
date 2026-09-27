@@ -36,3 +36,9 @@ def test_validate_rejects_bad_input():
         validate([{"days": [7], "start": "01:00", "end": "02:00"}])
     with pytest.raises(ValueError):
         validate([{"start": "25:00", "end": "02:00"}])
+
+
+def test_friendly_ffmpeg_errors():
+    from app.ffmpeg import explain
+    assert "Camera Account" in explain("method DESCRIBE failed: 401 Unauthorized")
+    assert explain("something else") == "something else"

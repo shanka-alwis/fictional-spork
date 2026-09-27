@@ -82,7 +82,9 @@ $("#logout").addEventListener("click", async () => { await api("/logout", { meth
 // ---------- routing ----------
 let timers = [];
 function every(ms, fn) { timers.push(setInterval(fn, ms)); }
-function stopTimers() { timers.forEach(clearInterval); timers = []; }
+let liveToken = 0; // bumped on navigation so live-view frame loops stop
+function stopTimers() { timers.forEach(clearInterval); timers = []; liveToken++; }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const views = {};
 function route() {
@@ -116,6 +118,7 @@ async function boot() {
 
 // ---------- Live ----------
 views.live = async (el) => {
+  const token = liveToken; // captured before any await, so a quick navigation away stops the loops
   const cols = localStorage.getItem("gridCols") || "2";
   el.innerHTML = `<h2>Live view <span class="spacer"></span>
       <span class="grid-controls">${[1, 2, 3, 4].map((n) =>
@@ -125,7 +128,8 @@ views.live = async (el) => {
     try { localStorage.setItem("gridCols", b.dataset.cols); } catch { /* private mode */ }
     route();
   }));
-  const cams = (await api("/cameras")).filter((c) => c.enabled);
+  const [all, settings] = await Promise.all([api("/cameras"), api("/settings")]);
+  const cams = all.filter((c) => c.enabled);
   const grid = $(".grid", el);
   if (!cams.length) {
     grid.outerHTML = `<div class="card empty">No cameras yet. <a href="#cameras">Add a camera</a> to get started.</div>`;
@@ -134,18 +138,12 @@ views.live = async (el) => {
   for (const c of cams) {
     const tile = document.createElement("div");
     tile.className = "tile";
-    tile.innerHTML = `<div class="msg">Connecting…</div>
-      <img alt="${esc(c.name)}" src="/api/cameras/${c.id}/live.mjpg?t=${Date.now()}">
+    tile.innerHTML = `<div class="msg">Connecting…</div><img alt="${esc(c.name)}">
       <div class="overlay"><span class="name">${esc(c.name)}</span><span class="st">${stateBadge(c.status)}</span></div>`;
-    const img = $("img", tile);
-    img.addEventListener("load", () => $(".msg", tile).classList.add("hidden"), { once: true });
-    img.addEventListener("error", () => {
-      $(".msg", tile).textContent = "Stream unavailable — retrying…";
-      setTimeout(() => { img.src = `/api/cameras/${c.id}/live.mjpg?t=${Date.now()}`; }, 5000);
-    });
     tile.addEventListener("dblclick", () => tile.classList.toggle("fullscreen"));
     tile.dataset.id = c.id;
     grid.appendChild(tile);
+    pumpFrames(tile, c.id, token, settings.live_fps);
   }
   every(5000, async () => {
     const fresh = await api("/cameras");
@@ -155,6 +153,31 @@ views.live = async (el) => {
     }
   });
 };
+
+// Fetch one frame at a time per camera, until the user navigates away.
+async function pumpFrames(tile, camId, token, fps) {
+  const img = $("img", tile), msg = $(".msg", tile);
+  let shown = null;
+  while (token === liveToken) {
+    const t0 = performance.now();
+    try {
+      const res = await fetch(`/api/cameras/${camId}/frame`, { cache: "no-store" });
+      if (res.status === 401) return showLogin();
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+      const url = URL.createObjectURL(await res.blob());
+      img.src = url;
+      if (shown) URL.revokeObjectURL(shown);
+      shown = url;
+      msg.classList.add("hidden");
+    } catch (err) {
+      msg.textContent = `Stream unavailable: ${err.message}. Retrying…`;
+      msg.classList.remove("hidden");
+      await sleep(5000);
+    }
+    await sleep(Math.max(0, 1000 / fps - (performance.now() - t0)));
+  }
+  if (shown) URL.revokeObjectURL(shown);
+}
 
 // ---------- Recordings ----------
 views.recordings = async (el) => {
@@ -263,14 +286,43 @@ function scheduleRow(w = { days: [0, 1, 2, 3, 4, 5, 6], start: "22:00", end: "06
     <button type="button" class="ghost danger s-del">✕</button></div>`;
 }
 
+// Tapo cameras: rtsp://<account>:<password>@<ip>:554/stream1 (full quality) and /stream2 (low res).
+const TAPO_RE = /^rtsp:\/\/([^:@\/]+):([^@\/]*)@([^:\/]+)(?::554)?\/stream1$/;
+function tapoUrls(ip, user, pass) {
+  const auth = `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${ip.trim()}:554`;
+  return { url: `rtsp://${auth}/stream1`, live_url: `rtsp://${auth}/stream2` };
+}
+function parseTapo(url) {
+  const m = TAPO_RE.exec(url || "");
+  return m ? { user: decodeURIComponent(m[1]), pass: decodeURIComponent(m[2]), ip: m[3] } : null;
+}
+
 function cameraForm(cam) {
-  const c = cam || { name: "", url: "", enabled: true, record_mode: "continuous", schedule: [], segment_seconds: 300, audio: false };
+  const c = cam || { name: "", url: "", live_url: null, enabled: true, record_mode: "continuous", schedule: [],
+    segment_seconds: 300, audio: true };
+  const tapo = cam ? parseTapo(cam.url) : { user: "", pass: "", ip: "" };
   openModal(`<h3>${cam ? "Edit camera" : "Add camera"}</h3>
     <form id="cam-form">
       <label>Name <input name="name" required value="${esc(c.name)}" placeholder="Front door"></label>
-      <label>Stream URL <input name="url" required value="${esc(c.url)}" placeholder="rtsp://user:pass@192.168.1.20:554/stream1">
-        <div class="hint">RTSP is typical for IP cameras (check your camera's manual, or its ONVIF info, for the path).
-          HTTP streams and local video files also work.</div></label>
+      <label>Camera type <select name="kind">
+        <option value="tapo">TP-Link Tapo (C200, C210, C310, …)</option>
+        <option value="other">Other RTSP / HTTP camera</option></select></label>
+      <div id="kind-tapo">
+        <label>IP address <input name="ip" value="${esc(tapo ? tapo.ip : "")}" placeholder="192.168.1.20">
+          <div class="hint">Shown in the Tapo app under Camera settings → Device info. Reserve it in your router so it never changes.</div></label>
+        <div class="row">
+          <label>Camera account username <input name="tuser" autocomplete="off" value="${esc(tapo ? tapo.user : "")}"></label>
+          <label>Camera account password <input name="tpass" type="password" autocomplete="new-password" value="${esc(tapo ? tapo.pass : "")}"></label>
+        </div>
+        <div class="hint" style="margin:-8px 0 12px">Not your Tapo login: create it in the Tapo app under
+          Camera settings → Advanced settings → Camera account.</div>
+      </div>
+      <div id="kind-other">
+        <label>Recording stream URL <input name="url" value="${esc(c.url)}" placeholder="rtsp://user:pass@192.168.1.20:554/stream1">
+          <div class="hint">Full-quality stream. HTTP streams and local video files also work.</div></label>
+        <label>Live view stream URL (optional) <input name="live_url" value="${esc(c.live_url || "")}" placeholder="rtsp://…/sub-stream">
+          <div class="hint">A low-resolution sub-stream keeps live view light. Leave empty to use the recording stream.</div></label>
+      </div>
       <div class="row">
         <label>Recording
           <select name="record_mode">
@@ -298,6 +350,17 @@ function cameraForm(cam) {
       </div>
     </form>`, (root) => {
     const f = $("#cam-form", root);
+    f.kind.value = tapo ? "tapo" : "other";
+    const syncKind = () => {
+      const isTapo = f.kind.value === "tapo";
+      $("#kind-tapo", root).classList.toggle("hidden", !isTapo);
+      $("#kind-other", root).classList.toggle("hidden", isTapo);
+      f.ip.required = f.tuser.required = isTapo;
+      f.url.required = !isTapo;
+    };
+    f.kind.addEventListener("change", syncKind); syncKind();
+    const urls = () => f.kind.value === "tapo" ? tapoUrls(f.ip.value, f.tuser.value, f.tpass.value)
+      : { url: f.url.value.trim(), live_url: f.live_url.value.trim() || null };
     f.record_mode.value = c.record_mode;
     f.segment_seconds.value = String(c.segment_seconds);
     const syncSched = () => $("#sched", root).classList.toggle("hidden", f.record_mode.value !== "schedule");
@@ -309,8 +372,11 @@ function cameraForm(cam) {
       const btn = e.target; btn.disabled = true; btn.textContent = "Testing…";
       const prev = $(".preview", root);
       try {
-        const blob = await api("/cameras/test", { method: "POST", body: { url: f.url.value } });
+        const u = urls();
+        const blob = await api("/cameras/test", { method: "POST", body: { url: u.url } });
         prev.innerHTML = `<img src="${URL.createObjectURL(blob)}">`;
+        if (u.live_url) await api("/cameras/test", { method: "POST", body: { url: u.live_url } });
+        prev.insertAdjacentHTML("beforeend", `<p class="badge ok">Connected${u.live_url ? " (both streams)" : ""}</p>`);
       } catch (err) { prev.innerHTML = `<p class="error">${esc(err.message)}</p>`; }
       btn.disabled = false; btn.textContent = "Test connection";
     });
@@ -325,7 +391,7 @@ function cameraForm(cam) {
         days: $$(".days input:checked", r).map((i) => +i.value),
         start: $(".s-start", r).value, end: $(".s-end", r).value,
       }));
-      const body = { name: f.name.value, url: f.url.value, record_mode: f.record_mode.value,
+      const body = { name: f.name.value, ...urls(), record_mode: f.record_mode.value,
         segment_seconds: +f.segment_seconds.value, audio: f.audio.checked, enabled: f.enabled.checked,
         schedule: f.record_mode.value === "schedule" ? schedule : c.schedule };
       try {
@@ -361,14 +427,14 @@ views.cameras = async (el) => {
 
 // ---------- Uploads ----------
 const CRON_PRESETS = [
-  ["*/15 * * * *", "Every 15 minutes"], ["0 * * * *", "Every hour"], ["0 */6 * * *", "Every 6 hours"],
-  ["0 2 * * *", "Daily at 02:00"], ["0 3 * * 0", "Weekly (Sunday 03:00)"],
+  ["0 1 * * *", "Daily at 01:00"], ["0 2 * * *", "Daily at 02:00"], ["0 * * * *", "Every hour"],
+  ["0 */6 * * *", "Every 6 hours"], ["*/15 * * * *", "Every 15 minutes"], ["0 3 * * 0", "Weekly (Sunday 03:00)"],
 ];
 
 async function destForm(dest) {
   const [cams, remotes] = await Promise.all([api("/cameras"), api("/rclone/remotes").catch(() => [])]);
   const d = dest || { name: "Google Drive", type: "rclone", target: remotes[0] ? remotes[0] + "CCTV" : "gdrive:CCTV",
-    cron: "0 * * * *", camera_ids: null, delete_after_upload: false, enabled: true };
+    cron: "0 1 * * *", camera_ids: null, delete_after_upload: false, remote_keep_days: 30, enabled: true };
   const isPreset = CRON_PRESETS.some(([c]) => c === d.cron);
   openModal(`<h3>${dest ? "Edit upload destination" : "Add upload destination"}</h3>
     <form id="dest-form">
@@ -384,6 +450,10 @@ async function destForm(dest) {
           <option value="custom">Custom (cron)…</option></select></label>
         <label>Cron expression <input name="cron" value="${esc(d.cron)}" placeholder="m h dom mon dow"></label>
       </div>
+      <label>Keep footage on the destination for (days)
+        <input type="number" min="0" name="remote_keep_days" value="${d.remote_keep_days}">
+        <div class="hint">Older footage is deleted from the destination after each upload run. 0 = keep forever.
+          Only files this app uploaded are ever deleted.</div></label>
       <div class="muted" style="margin-bottom:6px">Cameras</div>
       <label class="check"><input type="checkbox" name="allcams" ${d.camera_ids ? "" : "checked"}> All cameras</label>
       <div id="camlist" style="margin:-6px 0 12px 24px">${cams.map((c) => `<label class="check">
@@ -416,7 +486,8 @@ async function destForm(dest) {
     f.allcams.addEventListener("change", syncCams); syncCams();
     const body = () => ({ name: f.name.value, type: f.type.value, target: f.target.value, cron: f.cron.value,
       camera_ids: f.allcams.checked ? null : $$("#camlist input:checked", root).map((i) => +i.value),
-      delete_after_upload: f.delete_after_upload.checked, enabled: f.enabled.checked });
+      delete_after_upload: f.delete_after_upload.checked, remote_keep_days: +f.remote_keep_days.value,
+      enabled: f.enabled.checked });
     $("#dest-test", root).addEventListener("click", async (e) => {
       const msg = $("#dest-msg", root); e.target.disabled = true; msg.className = "muted"; msg.textContent = "Testing…";
       try { const r = await api("/destinations/test", { method: "POST", body: body() }); msg.className = "badge ok"; msg.textContent = r.message; }
@@ -440,7 +511,7 @@ async function destForm(dest) {
 views.uploads = async (el) => {
   el.innerHTML = `<h2>Scheduled uploads <span class="spacer"></span><button class="primary" id="add">+ Add destination</button></h2>
     <div class="card table-wrap" style="margin-bottom:16px"><table><thead><tr><th>Name</th><th>Target</th><th>Schedule</th>
-      <th>Next run</th><th>Last run</th><th>Pending</th><th></th></tr></thead><tbody id="dests"></tbody></table></div>
+      <th>Next run</th><th>Last run</th><th>Waiting</th><th>Space needed</th><th></th></tr></thead><tbody id="dests"></tbody></table></div>
     <h2>Recent uploads</h2>
     <div class="card table-wrap"><table><thead><tr><th>Time</th><th>Destination</th><th>File</th><th>Size</th><th>Status</th></tr></thead>
       <tbody id="hist"></tbody></table></div>`;
@@ -454,9 +525,11 @@ views.uploads = async (el) => {
       <td>${d.enabled ? fmtTime(d.next_run) : "—"}</td>
       <td>${d.running ? `<span class="badge recording">uploading…</span>` : d.last_run
         ? `${fmtTime(d.last_run)}<div class="hint">${esc(d.last_status)}</div>` : "never"}</td>
-      <td>${d.pending}</td>
+      <td>${d.pending} files<div class="hint">${fmtBytes(d.pending_bytes)}</div></td>
+      <td>${d.estimated_remote_bytes ? `~${fmtBytes(d.estimated_remote_bytes)}<div class="hint">${d.remote_keep_days} days at
+        ${fmtBytes(d.bytes_per_day)}/day</div>` : d.remote_keep_days ? `<span class="muted">measuring…</span>` : "keeps forever"}</td>
       <td class="actions"><button data-act="run" ${d.running ? "disabled" : ""}>Upload now</button><button data-act="edit">Edit</button></td></tr>`).join("")
-      || `<tr><td colspan="7" class="empty">No destinations yet. Add one to start uploading footage on a schedule.</td></tr>`;
+      || `<tr><td colspan="8" class="empty">No destinations yet. Add one to start uploading footage on a schedule.</td></tr>`;
     $$("#dests tr[data-id]", el).forEach((tr) => {
       const d = dests.find((x) => x.id === +tr.dataset.id);
       $("[data-act=edit]", tr).addEventListener("click", () => destForm(d));
@@ -478,23 +551,36 @@ views.uploads = async (el) => {
 views.settings = async (el) => {
   const [s, st] = await Promise.all([api("/settings"), api("/status")]);
   const usedPct = st.disk_total_bytes ? (1 - st.disk_free_bytes / st.disk_total_bytes) * 100 : 0;
+  const health = st.disk_health;
+  const failing = health && /FAIL/.test(health);
+  const healthy = health && !failing && /PASSED|\bOK\b/.test(health);
+  const rates = Object.entries(st.bytes_per_day);
   el.innerHTML = `<h2>Settings</h2>
     <div class="stats">
-      <div class="card stat"><div class="v">${fmtBytes(st.recordings_bytes)}</div><div class="k">Recordings on disk</div></div>
+      <div class="card stat"><div class="v">${fmtBytes(st.recordings_bytes)}</div><div class="k">Recordings on this computer</div></div>
       <div class="card stat"><div class="v">${fmtBytes(st.disk_free_bytes)}</div><div class="k">Free of ${fmtBytes(st.disk_total_bytes)}</div>
         <div class="bar"><div style="width:${usedPct.toFixed(1)}%"></div></div></div>
-      <div class="card stat"><div class="v">${st.recording}/${st.cameras}</div><div class="k">Cameras recording</div></div>
+      <div class="card stat"><div class="v">${st.total_bytes_per_day ? fmtBytes(st.total_bytes_per_day) : "—"}</div>
+        <div class="k">Recorded per day (all cameras)</div></div>
+      <div class="card stat"><div class="v">${health ? `<span class="badge ${healthy ? "ok" : failing ? "error" : ""}">${
+        healthy ? "healthy" : failing ? "check disk" : "unknown"}</span>` : "—"}</div>
+        <div class="k">Disk health (SMART)${health ? ` · <a id="smart-more">details</a>` : " · not available"}</div></div>
     </div>
+    ${rates.length ? `<div class="card table-wrap" style="margin-bottom:16px;max-width:640px"><table>
+      <thead><tr><th>Camera</th><th>Per day</th><th>Per 30 days</th></tr></thead><tbody>
+      ${rates.map(([name, b]) => `<tr><td>${esc(name)}</td><td>${b ? fmtBytes(b) : `<span class="muted">measuring…</span>`}</td>
+        <td>${b ? fmtBytes(b * 30) : ""}</td></tr>`).join("")}</tbody></table></div>` : ""}
     <form id="settings" class="card" style="max-width:640px">
-      <h3 style="margin-top:0">Local storage retention</h3>
+      <h3 style="margin-top:0">Footage on this computer</h3>
       <div class="row">
-        <label>Keep recordings for (days) <input type="number" min="0" name="retention_days" value="${s.retention_days}">
-          <div class="hint">0 = keep forever</div></label>
-        <label>Max storage (GB) <input type="number" min="0" step="0.1" name="max_storage_gb" value="${s.max_storage_gb}">
-          <div class="hint">Oldest footage is removed first. 0 = no limit</div></label>
+        <label>Delete after upload (days) <input type="number" min="0" step="0.5" name="local_keep_days_after_upload"
+          value="${s.local_keep_days_after_upload}">
+          <div class="hint">How long a clip stays here once it has been uploaded.</div></label>
+        <label>Free space safeguard (% full) <input type="number" min="0" max="99" name="max_disk_percent" value="${s.max_disk_percent}">
+          <div class="hint">Above this, the oldest <em>uploaded</em> clips are removed early. 0 = off.</div></label>
       </div>
-      <label class="check"><input type="checkbox" name="retention_require_upload" ${s.retention_require_upload ? "checked" : ""}>
-        Never delete footage that hasn't been uploaded yet</label>
+      <label>Delete even if not uploaded after (days) <input type="number" min="0" name="max_age_days" value="${s.max_age_days}">
+        <div class="hint">Last resort if uploads keep failing. 0 = never delete footage that hasn't been uploaded.</div></label>
       <h3>Live view</h3>
       <div class="row">
         <label>Frames per second <input type="number" min="1" max="30" name="live_fps" value="${s.live_fps}"></label>
@@ -508,15 +594,17 @@ views.settings = async (el) => {
     e.preventDefault();
     try {
       await api("/settings", { method: "PUT", body: {
-        retention_days: +f.retention_days.value, max_storage_gb: +f.max_storage_gb.value,
-        retention_require_upload: f.retention_require_upload.checked,
-        live_fps: +f.live_fps.value, live_width: +f.live_width.value } });
+        local_keep_days_after_upload: +f.local_keep_days_after_upload.value, max_age_days: +f.max_age_days.value,
+        max_disk_percent: +f.max_disk_percent.value, live_fps: +f.live_fps.value, live_width: +f.live_width.value } });
       toast("Settings saved");
     } catch (err) { toast(err.message, true); }
   });
   $("#ret-run", el).addEventListener("click", async () => {
     const r = await api("/retention/run", { method: "POST" }); toast(`Removed ${r.removed} file(s)`);
   });
+  if (health) $("#smart-more", el).addEventListener("click", () =>
+    openModal(`<h3>Disk health</h3><pre class="log" style="white-space:pre-wrap">${esc(health)}</pre>
+      <div class="modal-actions"><button onclick="closeModal()">Close</button></div>`));
 };
 
 // ---------- Logs ----------

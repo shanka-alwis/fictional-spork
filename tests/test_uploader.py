@@ -65,3 +65,48 @@ def test_rclone_upload(cfg, tmp_path):
     assert up.list_remotes() == ["fake:"]
     assert up.run(dest_id)["uploaded"] == 1
     assert (remote / "CCTV" / "Front Door" / "2026-09-27" / "20260927_100000.mp4").stat().st_size == 42
+
+
+def _age(path, days):
+    import os
+    import time
+    t = time.time() - days * 86400
+    os.utime(path, (t, t))
+
+
+def test_local_remote_cleanup(cfg, tmp_path):
+    target = tmp_path / "drive"
+    db, cam, dest_id = setup(cfg, {"type": "local", "target": str(target), "remote_keep_days": 30})
+    old = target / "Front Door" / "2026-08-01" / "20260801_100000.mp4"
+    other = target / "my-notes.txt"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"x")
+    other.write_text("keep me")
+    _age(old, 40)
+    _age(other, 40)
+    make_segment(cfg, cam, "20260927_100000.mp4", age=3600)
+    up = Uploader(db, cfg)
+    assert up.run(dest_id)["uploaded"] == 1
+    assert not old.exists() and not old.parent.exists() and other.exists()
+    assert (target / "Front Door" / "2026-09-27" / "20260927_100000.mp4").exists()  # mtime kept: 1h old
+    assert "removed 1 file(s) older than 30 days" in db.get_destination(dest_id)["last_status"]
+
+
+@pytest.mark.skipif(not HAS_RCLONE, reason="rclone not installed")
+def test_rclone_remote_cleanup(cfg, tmp_path):
+    remote = tmp_path / "remote"
+    conf = tmp_path / "rclone.conf"
+    conf.write_text(f"[fake]\ntype = alias\nremote = {remote}\n")
+    cfg.rclone_config = str(conf)
+    db, cam, dest_id = setup(cfg, {"type": "rclone", "target": "fake:CCTV", "remote_keep_days": 30})
+    old = remote / "CCTV" / "Front Door" / "2026-08-01" / "20260801_100000.mp4"
+    fresh = remote / "CCTV" / "Front Door" / "2026-09-20" / "20260920_100000.mp4"
+    stray = remote / "CCTV" / "old-photo.mp4"
+    for p in (old, fresh, stray):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    _age(old, 40)
+    _age(stray, 400)
+    _age(fresh, 7)
+    assert Uploader(db, cfg).cleanup_remote(db.get_destination(dest_id)) == 1
+    assert not old.exists() and fresh.exists() and stray.exists()

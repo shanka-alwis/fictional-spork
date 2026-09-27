@@ -56,17 +56,38 @@ def test_auth(tmp_path, monkeypatch):
         assert c.get("/api/cameras").status_code == 401
 
 
-def test_settings_and_retention(client, cfg):
+def test_settings_roundtrip(client):
+    s = client.get("/api/settings").json()
+    assert s["local_keep_days_after_upload"] == 1 and s["max_disk_percent"] == 85
+    s["local_keep_days_after_upload"] = 2
+    assert client.put("/api/settings", json=s).json()["local_keep_days_after_upload"] == 2
+    assert client.put("/api/settings", json={**s, "max_disk_percent": 150}).status_code == 422
+
+
+def test_tapo_camera_live_url(client):
+    cam = client.post("/api/cameras", json={"name": "Gate", "url": "rtsp://a:b@10.0.0.5:554/stream1",
+                                           "live_url": "rtsp://a:b@10.0.0.5:554/stream2"}).json()
+    assert cam["live_url"].endswith("stream2")
+    cam = client.put(f"/api/cameras/{cam['id']}", json={"name": "Gate", "url": "rtsp://x", "live_url": " "}).json()
+    assert cam["live_url"] is None
+
+
+def test_destination_defaults(client):
+    d = client.post("/api/destinations", json={"name": "Drive", "type": "rclone", "target": "gdrive:CCTV"}).json()
+    assert d["cron"] == "0 1 * * *" and d["remote_keep_days"] == 30
+    assert d["pending"] == 0 and d["pending_bytes"] == 0
+
+
+def test_status_reports_rates(client, cfg):
     cam = client.post("/api/cameras", json={"name": "Yard", "url": "rtsp://x"}).json()
-    old = make_segment(cfg, cam["id"], "20200101_000000.mp4")
-    new = make_segment(cfg, cam["id"], "20990101_000000.mp4", age=3600)
-    client.put("/api/settings", json={"retention_days": 7, "max_storage_gb": 0, "retention_require_upload": True,
-                                      "live_fps": 5, "live_width": 640})
-    assert client.post("/api/retention/run").json()["removed"] == 0  # not uploaded yet
-    client.put("/api/settings", json={"retention_days": 7, "max_storage_gb": 0, "retention_require_upload": False,
-                                      "live_fps": 5, "live_width": 640})
-    assert client.post("/api/retention/run").json()["removed"] == 1
-    assert not old.exists() and new.exists()
+    from datetime import datetime, timedelta
+    import os
+    start = datetime.now() - timedelta(minutes=10)
+    p = make_segment(cfg, cam["id"], start.strftime("%Y%m%d_%H%M%S.mp4"), size=300_000)
+    end = (start + timedelta(minutes=5)).timestamp()
+    os.utime(p, (end, end))
+    st = client.get("/api/status").json()
+    assert round(st["bytes_per_day"]["Yard"]) == 300_000 * 288  # 5-minute segment -> 288 per day
 
 
 def test_static_ui(client):

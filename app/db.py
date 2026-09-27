@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS cameras (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
+    live_url TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
     record_mode TEXT NOT NULL DEFAULT 'continuous',
     schedule TEXT NOT NULL DEFAULT '[]',
@@ -22,9 +23,10 @@ CREATE TABLE IF NOT EXISTS destinations (
     name TEXT NOT NULL,
     type TEXT NOT NULL,
     target TEXT NOT NULL,
-    cron TEXT NOT NULL DEFAULT '0 * * * *',
+    cron TEXT NOT NULL DEFAULT '0 1 * * *',
     camera_ids TEXT,
     delete_after_upload INTEGER NOT NULL DEFAULT 0,
+    remote_keep_days INTEGER NOT NULL DEFAULT 30,
     enabled INTEGER NOT NULL DEFAULT 1,
     last_run TEXT,
     last_status TEXT,
@@ -47,16 +49,23 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
+# Columns added after the first release; created on startup if missing.
+MIGRATIONS = [
+    ("cameras", "live_url", "TEXT"),
+    ("destinations", "remote_keep_days", "INTEGER NOT NULL DEFAULT 30"),
+]
+
 DEFAULT_SETTINGS = {
-    "retention_days": 14,
-    "max_storage_gb": 0,  # 0 = unlimited
-    "retention_require_upload": False,
+    "local_keep_days_after_upload": 1,  # delete local copy this long after it reached a destination
+    "max_age_days": 0,                  # delete even un-uploaded footage older than this (0 = never)
+    "max_disk_percent": 85,             # above this, delete oldest uploaded footage early (0 = off)
     "live_fps": 5,
     "live_width": 960,
 }
 
-CAMERA_FIELDS = ("name", "url", "enabled", "record_mode", "schedule", "segment_seconds", "audio")
-DEST_FIELDS = ("name", "type", "target", "cron", "camera_ids", "delete_after_upload", "enabled")
+CAMERA_FIELDS = ("name", "url", "live_url", "enabled", "record_mode", "schedule", "segment_seconds", "audio")
+DEST_FIELDS = ("name", "type", "target", "cron", "camera_ids", "delete_after_upload", "remote_keep_days",
+               "enabled")
 JSON_FIELDS = {"schedule", "camera_ids"}
 BOOL_FIELDS = {"enabled", "audio", "delete_after_upload"}
 
@@ -71,6 +80,10 @@ class Database:
         self._lock = threading.Lock()
         with self.conn() as c:
             c.executescript(SCHEMA)
+            for table, col, ddl in MIGRATIONS:
+                cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+                if col not in cols:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
     @contextmanager
     def conn(self):
@@ -194,6 +207,12 @@ class Database:
             for r in c.execute("SELECT rel_path, destination_id FROM uploads WHERE status = 'done'"):
                 out.setdefault(r[0], []).append(r[1])
         return out
+
+    def first_upload_times(self) -> dict[str, str]:
+        """rel_path -> ISO time it first reached any destination."""
+        with self.conn() as c:
+            rows = c.execute("SELECT rel_path, MIN(updated_at) FROM uploads WHERE status = 'done' GROUP BY rel_path")
+            return {r[0]: r[1] for r in rows}
 
     def recent_uploads(self, limit=100):
         with self.conn() as c:
