@@ -5,7 +5,7 @@ import threading
 from collections import deque
 from datetime import datetime
 
-log = logging.getLogger("dvr")
+log = logging.getLogger("bigeye")
 _events: deque = deque(maxlen=500)
 _lock = threading.Lock()
 _CRED_RE = re.compile(r"(://[^:/@\s]+:)[^@\s]+@")

@@ -6,20 +6,20 @@ from pathlib import Path
 
 class Config:
     def __init__(self, data_dir: str | os.PathLike | None = None):
-        self.data_dir = Path(data_dir or os.environ.get("DVR_DATA_DIR", "./data")).resolve()
+        self.data_dir = Path(data_dir or os.environ.get("BIGEYE_DATA_DIR", "./data")).resolve()
         self.recordings_dir = self.data_dir / "recordings"
-        self.db_path = self.data_dir / "dvr.sqlite3"
-        self.ffmpeg = os.environ.get("DVR_FFMPEG", "ffmpeg")
-        self.rclone = os.environ.get("DVR_RCLONE", "rclone")
+        self.db_path = self.data_dir / "bigeye.sqlite3"
+        self.ffmpeg = os.environ.get("BIGEYE_FFMPEG", "ffmpeg")
+        self.rclone = os.environ.get("BIGEYE_RCLONE", "rclone")
         # Optional explicit rclone config file; rclone's own default is used otherwise.
         self.rclone_config = os.environ.get("RCLONE_CONFIG") or None
-        self.username = os.environ.get("DVR_USERNAME", "admin")
-        self.password = os.environ.get("DVR_PASSWORD", "")
-        self.disable_workers = os.environ.get("DVR_DISABLE_WORKERS") == "1"
+        self.username = os.environ.get("BIGEYE_USERNAME", "admin")
+        self.password = os.environ.get("BIGEYE_PASSWORD", "")
+        self.disable_workers = os.environ.get("BIGEYE_DISABLE_WORKERS") == "1"
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
-        self.secret_key = os.environ.get("DVR_SECRET") or self._load_secret()
+        self.secret_key = os.environ.get("BIGEYE_SECRET") or self._load_secret()
 
     @property
     def auth_enabled(self) -> bool:

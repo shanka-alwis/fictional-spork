@@ -13,8 +13,8 @@ HAS_RCLONE = shutil.which("rclone") is not None
 
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
-    monkeypatch.setenv("DVR_DISABLE_WORKERS", "1")
-    monkeypatch.delenv("DVR_PASSWORD", raising=False)
+    monkeypatch.setenv("BIGEYE_DISABLE_WORKERS", "1")
+    monkeypatch.delenv("BIGEYE_PASSWORD", raising=False)
     return Config(tmp_path / "data")
 
 

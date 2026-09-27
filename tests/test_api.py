@@ -38,14 +38,14 @@ def test_recordings_listing_and_delete(client, cfg):
     assert [r["filename"] for r in recs] == ["20260920_101500.mp4"]
     assert "path" not in recs[0]
     assert client.get(f"/api/recordings/{cam['id']}/20260920_101500.mp4").status_code == 200
-    assert client.get(f"/api/recordings/{cam['id']}/..%2Fdvr.sqlite3").status_code == 404
+    assert client.get(f"/api/recordings/{cam['id']}/..%2Fbigeye.sqlite3").status_code == 404
     assert client.delete(f"/api/recordings/{cam['id']}/20260920_101500.mp4").status_code == 200
     assert len(client.get("/api/recordings").json()) == 1
 
 
 def test_auth(tmp_path, monkeypatch):
-    monkeypatch.setenv("DVR_DISABLE_WORKERS", "1")
-    monkeypatch.setenv("DVR_PASSWORD", "s3cret")
+    monkeypatch.setenv("BIGEYE_DISABLE_WORKERS", "1")
+    monkeypatch.setenv("BIGEYE_PASSWORD", "s3cret")
     with TestClient(create_app(Config(tmp_path))) as c:
         assert c.get("/api/cameras").status_code == 401
         assert c.get("/api/session").json() == {"auth_enabled": True, "user": None}
@@ -92,4 +92,4 @@ def test_status_reports_rates(client, cfg):
 
 def test_static_ui(client):
     r = client.get("/")
-    assert r.status_code == 200 and "<title>DVR</title>" in r.text
+    assert r.status_code == 200 and "<title>Big Eye</title>" in r.text

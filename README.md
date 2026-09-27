@@ -1,6 +1,6 @@
-# DVR: self-hosted CCTV recorder with nightly Google Drive upload
+# Big Eye: self-hosted CCTV recorder with nightly Google Drive upload
 
-A small, self-hosted network video recorder in the spirit of AgentDVR, set up for
+Big Eye is a small, self-hosted network video recorder in the spirit of AgentDVR, set up for
 **Tapo cameras on a Linux Mint Mac mini**. It records every camera around the clock,
 shows them live in the browser, and uploads the footage to Google Drive every night.
 
@@ -25,34 +25,34 @@ Drive space estimate, disk health (SMART), login, event log.
 For each camera:
 
 - **Camera settings → Advanced settings → Camera account**: create a username and password.
-  This is separate from your Tapo/TP-Link login; the DVR uses it to read the video. Using the
+  This is separate from your Tapo/TP-Link login; Big Eye uses it to read the video. Using the
   same camera account on all cameras makes setup quicker.
 - Note its IP address (**Camera settings → Device info**), and reserve that address for it in
   your router's DHCP settings so it never changes.
 
-### 2. Install the DVR
+### 2. Install Big Eye
 
 Plug the Mac mini into the router with an **Ethernet cable** (faster and more reliable than Wi-Fi
 for the nightly upload). Then open a terminal:
 
 ```bash
 sudo apt install -y git
-git clone https://github.com/shanka-alwis/fictional-spork.git dvr
-cd dvr
+git clone https://github.com/shanka-alwis/big-eye.git
+cd big-eye
 sudo ./scripts/install.sh
 ```
 
 The installer:
 
 - installs ffmpeg, rclone and Python;
-- copies the app to `/opt/dvr` and footage goes to `/var/lib/dvr`;
-- asks for the web page password (user `admin`), stored in `/etc/dvr.env`;
-- creates a `dvr` service that starts at boot and restarts itself if it ever crashes;
+- copies the app to `/opt/bigeye` and footage goes to `/var/lib/bigeye`;
+- asks for the web page password (user `admin`), stored in `/etc/bigeye.env`;
+- creates a `bigeye` service that starts at boot and restarts itself if it ever crashes;
 - **turns off sleep/suspend** so recording never stops (skip with `--keep-sleep`);
 - on a Mac mini, turns on **power on after a power cut** (skip with `--no-power-restore`);
 - runs a daily disk health check, shown on the Settings page.
 
-To update later: `cd dvr && git pull && sudo ./scripts/install.sh` (your settings and footage are kept).
+To update later: `cd big-eye && git pull && sudo ./scripts/install.sh` (your settings and footage are kept).
 
 ### 3. Connect Google Drive
 
@@ -60,7 +60,7 @@ Run this **as yourself, without sudo**, and answer the prompts roughly as below 
 varies a little between rclone versions):
 
 ```bash
-rclone config --config /var/lib/dvr/rclone.conf
+rclone config --config /var/lib/bigeye/rclone.conf
 ```
 
 - `n` (new remote), name: `gdrive`, storage: `drive`
@@ -89,14 +89,14 @@ Footage appears in Google Drive as `CCTV/<camera name>/<YYYY-MM-DD>/<YYYYMMDD_HH
 - **Settings** shows GB recorded per camera per day, free disk space and disk health.
 - **Uploads** shows the next and last upload, files waiting, and the Drive space 30 days will need.
 - **Logs** shows camera disconnects, uploads and clean-ups.
-- On the Mac mini: `systemctl status dvr` and `journalctl -u dvr -f`.
+- On the Mac mini: `systemctl status bigeye` and `journalctl -u bigeye -f`.
 
 ### Good to know
 
 - **Upload speed.** Every night's upload must finish before the next one. Check the Uploads page
   after the first few nights: if "files waiting" keeps growing, your upload bandwidth is too slow
   for full quality from all cameras.
-- **Tapo RTSP limits.** Tapo cameras accept only a few RTSP connections at once. The DVR uses one
+- **Tapo RTSP limits.** Tapo cameras accept only a few RTSP connections at once. Big Eye uses one
   for recording and, while someone is watching, one for live view. If you also point another RTSP
   app at the same camera, one of them may be refused.
 - **Codecs.** C200/C210-type cameras send H.264, which every browser plays. If a model sends H.265,
@@ -106,27 +106,27 @@ Footage appears in Google Drive as `CCTV/<camera name>/<YYYY-MM-DD>/<YYYYMMDD_HH
 ## Running with Docker instead
 
 ```bash
-# edit docker-compose.yml: set TZ and DVR_PASSWORD
+# edit docker-compose.yml: set TZ and BIGEYE_PASSWORD
 docker compose up -d --build
-docker compose run --rm dvr rclone config   # answer "n" to the web-browser question; see rclone docs
+docker compose run --rm bigeye rclone config   # answer "n" to the web-browser question; see rclone docs
 ```
 
 ## Configuration (environment variables)
 
-Set in `/etc/dvr.env` (installer) or `docker-compose.yml`, then `sudo systemctl restart dvr`.
+Set in `/etc/bigeye.env` (installer) or `docker-compose.yml`, then `sudo systemctl restart bigeye`.
 
 | Variable | Default | |
 |---|---|---|
-| `DVR_DATA_DIR` | `/var/lib/dvr` | Database and footage (`recordings/<camera id>/*.mp4`) |
-| `DVR_PORT` / `DVR_HOST` | `8090` / `0.0.0.0` | Web server |
-| `DVR_USERNAME` / `DVR_PASSWORD` | `admin` / set at install | Login. An empty password disables the login |
-| `RCLONE_CONFIG` | `/var/lib/dvr/rclone.conf` | rclone config file |
-| `DVR_FFMPEG` / `DVR_RCLONE` | `ffmpeg` / `rclone` | Binary paths |
+| `BIGEYE_DATA_DIR` | `/var/lib/bigeye` | Database and footage (`recordings/<camera id>/*.mp4`) |
+| `BIGEYE_PORT` / `BIGEYE_HOST` | `8090` / `0.0.0.0` | Web server |
+| `BIGEYE_USERNAME` / `BIGEYE_PASSWORD` | `admin` / set at install | Login. An empty password disables the login |
+| `RCLONE_CONFIG` | `/var/lib/bigeye/rclone.conf` | rclone config file |
+| `BIGEYE_FFMPEG` / `BIGEYE_RCLONE` | `ffmpeg` / `rclone` | Binary paths |
 
 ## How it works
 
 ```
-Tapo stream1 ──RTSP──▶ ffmpeg (copy, no re-encode) ──▶ /var/lib/dvr/recordings/<cam>/20260927_140000.mp4
+Tapo stream1 ──RTSP──▶ ffmpeg (copy, no re-encode) ──▶ /var/lib/bigeye/recordings/<cam>/20260927_140000.mp4
 Tapo stream2 ──RTSP──▶ ffmpeg → JPEG frames ──▶ live view                 │
                                                                           │ 01:00 daily
                                                     rclone copyto ◀───────┘

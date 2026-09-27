@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Installs (or updates) the DVR as a system service on Linux Mint / Ubuntu / Debian.
+# Installs (or updates) Big Eye as a system service on Linux Mint / Ubuntu / Debian.
 #
 #   sudo ./scripts/install.sh [--keep-sleep] [--no-power-restore]
 #
 # Re-running it updates the app and keeps your settings, password and footage.
 set -euo pipefail
 
-APP_DIR=/opt/dvr
-DATA_DIR=${DVR_DATA_DIR:-/var/lib/dvr}
-ENV_FILE=/etc/dvr.env
-PORT=${DVR_PORT:-8090}
+APP_DIR=/opt/bigeye
+DATA_DIR=${BIGEYE_DATA_DIR:-/var/lib/bigeye}
+ENV_FILE=/etc/bigeye.env
+PORT=${BIGEYE_PORT:-8090}
 KEEP_SLEEP=0
 POWER_RESTORE=1
 for arg in "$@"; do
@@ -66,10 +66,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   fi
   umask 077
   cat > "$ENV_FILE" <<ENV
-DVR_DATA_DIR=$DATA_DIR
-DVR_PORT=$PORT
-DVR_USERNAME=admin
-DVR_PASSWORD=$PASSWORD
+BIGEYE_DATA_DIR=$DATA_DIR
+BIGEYE_PORT=$PORT
+BIGEYE_USERNAME=admin
+BIGEYE_PASSWORD=$PASSWORD
 RCLONE_CONFIG=$DATA_DIR/rclone.conf
 ENV
   umask 022
@@ -78,10 +78,10 @@ else
   echo "Keeping existing settings in $ENV_FILE"
 fi
 
-step "Creating the dvr service"
-cat > /etc/systemd/system/dvr.service <<UNIT
+step "Creating the bigeye service"
+cat > /etc/systemd/system/bigeye.service <<UNIT
 [Unit]
-Description=DVR camera recorder
+Description=Big Eye camera recorder
 Wants=network-online.target
 After=network-online.target local-fs.target
 
@@ -101,7 +101,7 @@ UNIT
 step "Setting up a daily disk health check"
 cat > "$APP_DIR/smart-check.sh" <<'SH'
 #!/bin/sh
-# Writes the SMART health of every disk where the DVR web page can show it.
+# Writes the SMART health of every disk where the Big Eye web page can show it.
 out="$1/smart-status.txt"
 {
   for d in $(lsblk -dno NAME,TYPE | awk '$2 == "disk" {print $1}'); do
@@ -113,17 +113,17 @@ mv "$out.tmp" "$out"
 chmod 644 "$out"
 SH
 chmod 755 "$APP_DIR/smart-check.sh"
-cat > /etc/systemd/system/dvr-smart.service <<UNIT
+cat > /etc/systemd/system/bigeye-smart.service <<UNIT
 [Unit]
-Description=DVR disk health check
+Description=Big Eye disk health check
 
 [Service]
 Type=oneshot
 ExecStart=$APP_DIR/smart-check.sh $DATA_DIR
 UNIT
-cat > /etc/systemd/system/dvr-smart.timer <<'UNIT'
+cat > /etc/systemd/system/bigeye-smart.timer <<'UNIT'
 [Unit]
-Description=Daily DVR disk health check
+Description=Daily Big Eye disk health check
 
 [Timer]
 OnBootSec=5min
@@ -144,7 +144,7 @@ if [[ $POWER_RESTORE -eq 1 && "$PRODUCT" == Macmini* ]]; then
   step "Enabling 'power on after power failure' ($PRODUCT)"
   # Mac minis ignore the BIOS-style setting under Linux; this clears the Intel PCH's
   # AFTERG3_EN bit so the machine boots itself when power returns. Needs setting every boot.
-  cat > /etc/systemd/system/dvr-power-restore.service <<'UNIT'
+  cat > /etc/systemd/system/bigeye-power-restore.service <<'UNIT'
 [Unit]
 Description=Mac mini: power on automatically after a power failure
 
@@ -155,24 +155,24 @@ ExecStart=/usr/bin/setpci -s 0:1f.0 0xa4.b=0
 [Install]
 WantedBy=multi-user.target
 UNIT
-  systemctl enable --now dvr-power-restore.service >/dev/null
+  systemctl enable --now bigeye-power-restore.service >/dev/null
 fi
 
 step "Starting services"
 systemctl daemon-reload
-systemctl enable --now dvr-smart.timer >/dev/null
-systemctl start dvr-smart.service || true
-systemctl enable dvr.service >/dev/null
-systemctl restart dvr.service
+systemctl enable --now bigeye-smart.timer >/dev/null
+systemctl start bigeye-smart.service || true
+systemctl enable bigeye.service >/dev/null
+systemctl restart bigeye.service
 sleep 2
-systemctl --no-pager --lines=0 status dvr.service || true
+systemctl --no-pager --lines=0 status bigeye.service || true
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 cat <<DONE
 
-$(printf '\033[1;32m')DVR is running.$(printf '\033[0m')
+$(printf '\033[1;32m')Big Eye is running.$(printf '\033[0m')
   Web page:  http://${IP:-localhost}:$PORT   (user: admin)
-  Logs:      journalctl -u dvr -f
+  Logs:      journalctl -u bigeye -f
   Footage:   $DATA_DIR/recordings
 
 Next: connect Google Drive (run as yourself, NOT with sudo):

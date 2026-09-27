@@ -10,7 +10,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 
-ENV DVR_DATA_DIR=/data \
+ENV BIGEYE_DATA_DIR=/data \
     RCLONE_CONFIG=/data/rclone/rclone.conf \
     PYTHONUNBUFFERED=1
 VOLUME /data

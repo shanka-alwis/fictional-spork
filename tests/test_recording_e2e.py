@@ -39,8 +39,8 @@ def test_live_frame_endpoint(tmp_path, sample_video, monkeypatch):
     from fastapi.testclient import TestClient
 
     from app.main import create_app
-    monkeypatch.setenv("DVR_DISABLE_WORKERS", "1")
-    monkeypatch.delenv("DVR_PASSWORD", raising=False)
+    monkeypatch.setenv("BIGEYE_DISABLE_WORKERS", "1")
+    monkeypatch.delenv("BIGEYE_PASSWORD", raising=False)
     with TestClient(create_app(Config(tmp_path))) as c:
         cam = c.post("/api/cameras", json={"name": "T", "url": "rtsp://unused", "live_url": str(sample_video)}).json()
         r = c.get(f"/api/cameras/{cam['id']}/frame")

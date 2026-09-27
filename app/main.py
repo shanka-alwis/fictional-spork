@@ -1,4 +1,4 @@
-"""AgentDVR-style NVR: record IP cameras with ffmpeg and upload footage on a schedule."""
+"""Big Eye, an AgentDVR-style NVR: record IP cameras with ffmpeg and upload footage on a schedule."""
 import asyncio
 import hmac
 import logging
@@ -92,14 +92,14 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not cfg.disable_workers:
             recorder.start()
             jobs.start()
-        events.emit("info", "system", "DVR started" + ("" if cfg.auth_enabled else
-                    " (no DVR_PASSWORD set: web UI is not password protected)"))
+        events.emit("info", "system", "Big Eye started" + ("" if cfg.auth_enabled else
+                    " (no BIGEYE_PASSWORD set: web UI is not password protected)"))
         yield
         jobs.shutdown()
         recorder.shutdown()
         live.shutdown()
 
-    app = FastAPI(title="DVR", lifespan=lifespan)
+    app = FastAPI(title="Big Eye", lifespan=lifespan)
     app.state.cfg, app.state.db, app.state.recorder = cfg, db, recorder
     app.state.uploader, app.state.jobs, app.state.live = uploader, jobs, live
 
@@ -349,8 +349,8 @@ def main():
     import uvicorn
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     import os
-    uvicorn.run(create_app(), host=os.environ.get("DVR_HOST", "0.0.0.0"),
-                port=int(os.environ.get("DVR_PORT", "8090")))
+    uvicorn.run(create_app(), host=os.environ.get("BIGEYE_HOST", "0.0.0.0"),
+                port=int(os.environ.get("BIGEYE_PORT", "8090")))
 
 
 if __name__ == "__main__":

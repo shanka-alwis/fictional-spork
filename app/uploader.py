@@ -70,7 +70,7 @@ class Uploader:
             if not p.is_absolute():
                 raise UploadError("folder must be an absolute path")
             p.mkdir(parents=True, exist_ok=True)
-            probe = p / ".dvr-write-test"
+            probe = p / ".bigeye-write-test"
             try:
                 probe.write_text("ok")
                 probe.unlink()
